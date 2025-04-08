@@ -1,6 +1,6 @@
 # Importing necessary modules
 import pyautogui  # For typing automation
-import time  # To introduce delays between typing
+import time  # For delays between typing
 from tkinter import (
     filedialog,
     Tk,
@@ -10,32 +10,52 @@ from tkinter import (
     Entry,
     Frame,
     Scale,
+    messagebox,
 )  # GUI components
 import threading  # For running typing in a separate thread
 import keyboard  # For detecting keyboard shortcuts
 import pygetwindow as gw  # For detecting active window
+import sys  # For graceful exit handling
 
 # Initialize flags, variables, and default settings
 typing_active = False  # Track whether typing should continue
 typing_paused = False  # Track if typing is paused
-start_shortcut = "ctrl+shift+1"
-pause_shortcut = "ctrl+shift+p"
-end_shortcut = "ctrl+shift+e"
-typing_speed = 10  # Default typing speed
+start_shortcut = "ctrl+alt+1"  # Default start shortcut (changed from ctrl+shift+1)
+pause_shortcut = "ctrl+alt+p"  # Default pause shortcut
+end_shortcut = "ctrl+alt+e"  # Default end shortcut
+typing_speed = 10  # Default typing speed (1-30)
 shortcuts_registered = False  # Track if shortcuts have been registered
+typing_thread = None  # Store the typing thread for proper cleanup
 
 
-# Function to allow setting the typing window focus
+# Function to validate shortcuts (ensure they are not system-reserved)
+def validate_shortcut(shortcut):
+    forbidden_combinations = ["ctrl+alt+del", "alt+f4", "ctrl+c", "ctrl+v"]
+    if shortcut.lower() in forbidden_combinations:
+        messagebox.showerror(
+            "Invalid Shortcut", f"{shortcut} is a reserved system shortcut!"
+        )
+        return False
+    return True
+
+
+# Function to wait for the user to focus on the target window
 def wait_for_focus():
-    time.sleep(5)  # Give user 2 seconds to switch to desired typing window
+    time.sleep(2)  # Give user 2 seconds to switch to the desired window
+    initial_window = gw.getActiveWindow()  # Store the initial window
+
     while typing_active and gw.getActiveWindow().title == root.title:
-        time.sleep(0.1)  # Wait until the focus is no longer on this app
+        time.sleep(0.1)  # Wait until focus is no longer on this app
+
+    return initial_window  # Return the target window for later checks
 
 
 # Function to pause or resume typing
 def toggle_pause_typing():
     global typing_paused
     typing_paused = not typing_paused  # Toggle paused state
+
+    # Update UI to reflect pause/resume state
     root.after(
         0,
         lambda: pause_button.config(
@@ -50,149 +70,169 @@ def toggle_pause_typing():
     )
 
 
-# Function to end typing and reset
+# Function to safely end typing and cleanup
 def end_typing():
-    global typing_active, typing_paused
+    global typing_active, typing_paused, typing_thread
     typing_active = False  # Stop typing
     typing_paused = False  # Reset paused state
-    root.after(
-        0, lambda: pause_button.config(text="Pause Typing")
-    )  # Reset button label
-    root.after(
-        0, lambda: status_label.config(text="Status: Stopped")
-    )  # Update status label
+
+    # Reset UI elements
+    root.after(0, lambda: pause_button.config(text="Pause Typing"))
+    root.after(0, lambda: status_label.config(text="Status: Stopped"))
+
+    # Wait for the typing thread to finish (if running)
+    if typing_thread and typing_thread.is_alive():
+        typing_thread.join(timeout=0.5)
 
 
-# Function to adjust typing speed from the slider
+# Function to adjust typing speed (smoothed scaling)
 def set_typing_speed(value):
     global typing_speed
-    typing_speed = int(value)  # Update typing speed from slider value
+    typing_speed = int(value)
+    # Smoother speed scaling (avoids extreme delays at low speeds)
+    return max(0.03, 0.5 / typing_speed)  # Ensures minimum delay of 0.03s
 
 
-# Function to type the given input (word, sentence, or paragraph) with window locking
+# Core typing function with window focus checks
 def type_text(input_text):
     global typing_active, typing_paused
-    typing_active = True  # Allow typing
-    root.after(
-        0, lambda: status_label.config(text="Status: Typing")
-    )  # Update status to Typing
 
-    # Capture the initial target window where typing begins
-    initial_window = gw.getActiveWindow()  # Get the current active window
+    typing_active = True
+    root.after(0, lambda: status_label.config(text="Status: Typing"))
 
-    wait_for_focus()  # Wait for user to set the focus to a typing area
+    initial_window = wait_for_focus()  # Get the target window
 
     for char in input_text:
-        if not typing_active:  # Stop typing if ended
+        if not typing_active:  # Exit if stopped
             break
-        while typing_paused:  # Pause typing if paused
-            time.sleep(0.1)  # Small delay to avoid high CPU usage
 
-        # Check if the active window is still the initial window
+        while typing_paused:  # Pause if requested
+            time.sleep(0.1)
+
+        # Check if the correct window is focused
         current_window = gw.getActiveWindow()
-        if current_window != initial_window:  # If user switches to another window
+        if current_window != initial_window:
             root.after(
                 0, lambda: status_label.config(text="Status: Paused (Wrong Window)")
             )
-            while (
-                current_window != initial_window
-            ):  # Wait until the user returns to the original window
-                time.sleep(0.1)  # Poll every 0.1 seconds to check the window
+            while current_window != initial_window and typing_active:
+                time.sleep(0.1)
                 current_window = gw.getActiveWindow()
-            root.after(
-                0, lambda: status_label.config(text="Status: Typing")
-            )  # Resume typing once back in the target window
+            root.after(0, lambda: status_label.config(text="Status: Typing"))
 
-        pyautogui.write(char)  # Type each character where the cursor is focused
-        time.sleep(
-            max(0.02, 0.1 / typing_speed)
-        )  # Adjust typing speed with minimum threshold
+        pyautogui.write(char)  # Type the character
+        time.sleep(set_typing_speed(typing_speed))  # Use smoothed speed
 
-    root.after(
-        0, lambda: status_label.config(text="Status: Stopped")
-    )  # Update status when done
+    end_typing()  # Clean up when done
 
 
-# Wrapper function to start typing in a new thread
+# Wrapper function to start typing in a thread
 def start_typing_thread(input_text):
-    threading.Thread(target=type_text, args=(input_text,), daemon=True).start()
+    global typing_thread
+    end_typing()  # Stop any existing typing
+    typing_thread = threading.Thread(
+        target=type_text, args=(input_text,), daemon=True
+    )
+    typing_thread.start()
 
 
-# Function to type contents of the text file
+# Function to type from a file (with encoding support)
 def type_from_file(file_path):
     try:
-        with open(file_path, "r") as file:  # Open the file in read mode
-            content = file.read()  # Read the entire file content
-            start_typing_thread(content)  # Start typing in a new thread
+        with open(file_path, "r", encoding="utf-8") as file:
+            content = file.read()
+            if content:
+                start_typing_thread(content)
+            else:
+                messagebox.showwarning("Empty File", "The selected file is empty!")
     except FileNotFoundError:
-        print("File not found. Please check the path.")
-        root.after(
-            0, lambda: status_label.config(text="Status: File Not Found")
-        )  # Update status on error
+        messagebox.showerror("Error", "File not found. Please check the path.")
+    except UnicodeDecodeError:
+        messagebox.showerror("Error", "Could not read file (encoding issue).")
 
 
-# Function to get text input from user and start typing
+# Get text from GUI and start typing
 def get_text_input():
-    input_text = text_box.get("1.0", "end-1c").strip()  # Get text from text box
-    if input_text:  # Check if text is present
-        start_typing_thread(input_text)  # Start typing in a new thread
+    input_text = text_box.get("1.0", "end-1c").strip()
+    if input_text:
+        start_typing_thread(input_text)
+    else:
+        messagebox.showwarning("No Text", "Please enter text to type.")
 
 
-# Function to let user select a file and start typing its content
+# Let user select a text file
 def select_file():
-    file_path = filedialog.askopenfilename(
-        filetypes=[("Text Files", "*.txt")]
-    )  # Limit to text files only
-    if file_path:  # Check if a file was selected
-        type_from_file(file_path)  # Start typing in a new thread
+    file_path = filedialog.askopenfilename(filetypes=[("Text Files", "*.txt")])
+    if file_path:
+        type_from_file(file_path)
 
 
-# Function to customize shortcuts
+# Customize and validate shortcuts
 def set_shortcuts():
     global start_shortcut, pause_shortcut, end_shortcut
-    start_shortcut = start_entry.get().strip()
-    pause_shortcut = pause_entry.get().strip()
-    end_shortcut = end_entry.get().strip()
-    shortcut_label.config(
-        text=f"Start: {start_shortcut} | Pause: {pause_shortcut} | End: {end_shortcut}"
-    )
+
+    new_start = start_entry.get().strip()
+    new_pause = pause_entry.get().strip()
+    new_end = end_entry.get().strip()
+
+    # Validate shortcuts before applying
+    if (
+        validate_shortcut(new_start)
+        and validate_shortcut(new_pause)
+        and validate_shortcut(new_end)
+    ):
+        start_shortcut = new_start
+        pause_shortcut = new_pause
+        end_shortcut = new_end
+        update_shortcuts()
+        shortcut_label.config(
+            text=f"Start: {start_shortcut} | Pause: {pause_shortcut} | End: {end_shortcut}"
+        )
+        messagebox.showinfo("Success", "Shortcuts updated successfully!")
+    else:
+        messagebox.showerror("Error", "Invalid shortcut combination!")
 
 
-# Setting up keyboard shortcuts with a check to prevent duplicate registrations
-def register_shortcuts():
-    global shortcuts_registered
-    if not shortcuts_registered:
-        keyboard.add_hotkey(
-            start_shortcut, get_text_input
-        )  # Start typing with shortcut
-        keyboard.add_hotkey(
-            pause_shortcut, toggle_pause_typing
-        )  # Pause/resume with shortcut
-        keyboard.add_hotkey(end_shortcut, end_typing)  # End typing with shortcut
-        shortcuts_registered = True
+# Register/unregister shortcuts safely
+def update_shortcuts():
+    keyboard.unhook_all()  # Clear existing shortcuts
+    try:
+        keyboard.add_hotkey(start_shortcut, get_text_input)
+        keyboard.add_hotkey(pause_shortcut, toggle_pause_typing)
+        keyboard.add_hotkey(end_shortcut, end_typing)
+    except Exception as e:
+        messagebox.showerror("Shortcut Error", f"Failed to register shortcuts: {e}")
 
 
-# Tkinter GUI setup with dark mode
+# Cleanup on window close
+def on_close():
+    end_typing()
+    keyboard.unhook_all()
+    root.destroy()
+    sys.exit(0)
+
+
+# ===================== GUI SETUP =====================
 root = Tk()
-root.title("Enhanced Auto Typer")
+root.title("Enhanced Auto Typer v2.0")
 root.configure(bg="#2c2c2c")
 
-# Define color scheme for dark mode
+# Dark mode color scheme
 bg_color = "#2c2c2c"
 frame_bg = "#202020"
 text_color = "#ffffff"
-button_color = "#2c2c2c"
-highlight_color = "#383838"
+button_color = "#3a3a3a"
+highlight_color = "#4a4a4a"
 
-# Align UI elements with a Frame for better structure and spacing
+# Main frame for layout
 frame = Frame(root, padx=10, pady=10, bg=frame_bg)
 frame.pack()
 
-# Text box for inputting text
+# Text input box
 text_box = Text(
     frame,
     height=10,
-    width=50,
+    width=60,
     wrap="word",
     padx=5,
     pady=5,
@@ -202,29 +242,26 @@ text_box = Text(
 )
 text_box.grid(row=0, column=0, columnspan=3, pady=10)
 
-# Button to start typing the text entered in the text box
-type_button = Button(
+# Action buttons
+Button(
     frame,
     text="Start Typing",
     command=get_text_input,
     bg=button_color,
     fg=text_color,
     activebackground=highlight_color,
-)
-type_button.grid(row=1, column=0, sticky="ew", padx=5, pady=5)
+).grid(row=1, column=0, sticky="ew", padx=5, pady=5)
 
-# Button to select a file and start typing its content
-file_button = Button(
+Button(
     frame,
     text="Type From File",
     command=select_file,
     bg=button_color,
     fg=text_color,
     activebackground=highlight_color,
-)
-file_button.grid(row=1, column=1, sticky="ew", padx=5, pady=5)
+).grid(row=1, column=1, sticky="ew", padx=5, pady=5)
 
-# Pause/Resume button for toggling typing state
+# Control buttons
 pause_button = Button(
     frame,
     text="Pause Typing",
@@ -235,83 +272,80 @@ pause_button = Button(
 )
 pause_button.grid(row=2, column=0, sticky="ew", padx=5, pady=5)
 
-# Button to end typing
-end_button = Button(
+Button(
     frame,
     text="End Typing",
     command=end_typing,
     bg=button_color,
     fg=text_color,
     activebackground=highlight_color,
-)
-end_button.grid(row=2, column=1, sticky="ew", padx=5, pady=5)
+).grid(row=2, column=1, sticky="ew", padx=5, pady=5)
 
-# Typing speed adjustment with a slider
+# Typing speed slider
 Label(
-    frame, text="Typing Speed (10 = Fast, 1 = Slow):", bg=frame_bg, fg=text_color
-).grid(row=3, column=0, columnspan=2)
+    frame,
+    text="Typing Speed (1=Slow, 30=Fast):",
+    bg=frame_bg,
+    fg=text_color,
+).grid(row=3, column=0, columnspan=2, sticky="w")
 speed_slider = Scale(
     frame,
     from_=1,
     to=30,
     orient="horizontal",
-    command=set_typing_speed,
+    command=lambda v: set_typing_speed(v),
     bg=bg_color,
     fg=text_color,
     highlightbackground=bg_color,
 )
 speed_slider.set(typing_speed)
-speed_slider.grid(row=3, column=2, padx=5, pady=5)
+speed_slider.grid(row=3, column=2, padx=5, pady=5, sticky="ew")
 
-# Shortcut customization
-Label(frame, text="Customize Shortcuts", bg=frame_bg, fg=text_color).grid(
-    row=4, column=0, columnspan=3, pady=10
+# Shortcut customization section
+Label(frame, text="Custom Shortcuts", bg=frame_bg, fg=text_color).grid(
+    row=4, column=0, columnspan=3, pady=(10, 0)
 )
-Label(frame, text="Start Typing Shortcut:", bg=frame_bg, fg=text_color).grid(
-    row=5, column=0
-)
+
+Label(frame, text="Start:", bg=frame_bg, fg=text_color).grid(row=5, column=0, sticky="e")
 start_entry = Entry(frame, bg=bg_color, fg=text_color, insertbackground=text_color)
 start_entry.insert(0, start_shortcut)
-start_entry.grid(row=5, column=1)
+start_entry.grid(row=5, column=1, sticky="ew")
 
-Label(frame, text="Pause Typing Shortcut:", bg=frame_bg, fg=text_color).grid(
-    row=6, column=0
-)
+Label(frame, text="Pause:", bg=frame_bg, fg=text_color).grid(row=6, column=0, sticky="e")
 pause_entry = Entry(frame, bg=bg_color, fg=text_color, insertbackground=text_color)
 pause_entry.insert(0, pause_shortcut)
-pause_entry.grid(row=6, column=1)
+pause_entry.grid(row=6, column=1, sticky="ew")
 
-Label(frame, text="End Typing Shortcut:", bg=frame_bg, fg=text_color).grid(
-    row=7, column=0
-)
+Label(frame, text="End:", bg=frame_bg, fg=text_color).grid(row=7, column=0, sticky="e")
 end_entry = Entry(frame, bg=bg_color, fg=text_color, insertbackground=text_color)
 end_entry.insert(0, end_shortcut)
-end_entry.grid(row=7, column=1)
+end_entry.grid(row=7, column=1, sticky="ew")
 
-# Button to save and set the shortcuts
-shortcut_button = Button(
+Button(
     frame,
-    text="Set Shortcuts",
+    text="Update Shortcuts",
     command=set_shortcuts,
     bg=button_color,
     fg=text_color,
     activebackground=highlight_color,
-)
-shortcut_button.grid(row=8, column=0, columnspan=3, pady=5)
+).grid(row=8, column=0, columnspan=3, pady=5)
 
-# Label to show the currently set shortcuts
+# Current shortcuts display
 shortcut_label = Label(
     frame,
-    text=f"Start: {start_shortcut} | Pause: {pause_shortcut} | End: {end_shortcut}",
+    text=f"Active: Start={start_shortcut} | Pause={pause_shortcut} | End={end_shortcut}",
     bg=frame_bg,
-    fg=text_color,
+    fg="#aaaaaa",
 )
 shortcut_label.grid(row=9, column=0, columnspan=3)
 
-# Status label to show current status (Typing, Paused, Stopped, etc.)
-status_label = Label(frame, text="Status: Stopped", bg=frame_bg, fg=text_color)
-status_label.grid(row=10, column=0, columnspan=3, pady=10)
+# Status indicator
+status_label = Label(
+    frame, text="Status: Stopped", bg=frame_bg, fg=text_color, font=("Arial", 10, "bold")
+)
+status_label.grid(row=10, column=0, columnspan=3, pady=(10, 5))
 
-# Register the shortcuts and start the Tkinter main loop
-register_shortcuts()
+# Initialize and run
+update_shortcuts()
+root.protocol("WM_DELETE_WINDOW", on_close)
 root.mainloop()

@@ -68,4 +68,3 @@ Pull requests welcome! For major changes, please open an issue first.
 ---
 
 💡 **Pro Tip**: Run as Administrator on Windows for best shortcut reliability.
-```
